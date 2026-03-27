@@ -109,6 +109,10 @@ export function detectDuplicateTokens(
     const t = config.channels.discord.token;
     tokenMap.set(t, [...(tokenMap.get(t) ?? []), "discord"]);
   }
+  if (config.anthropic?.authToken) {
+    const t = config.anthropic.authToken;
+    tokenMap.set(t, [...(tokenMap.get(t) ?? []), "anthropic-oauth"]);
+  }
   if (config.anthropic?.apiKey) {
     const t = config.anthropic.apiKey;
     tokenMap.set(t, [...(tokenMap.get(t) ?? []), "anthropic"]);
@@ -154,6 +158,14 @@ function warnRawTokens(
   ) {
     logger?.warn(
       'Anthropic API key is stored as raw value. Use env var reference (e.g. "$ANTHROPIC_API_KEY") instead.'
+    );
+  }
+  if (
+    config.anthropic?.authToken &&
+    !config.anthropic.authToken.startsWith("$")
+  ) {
+    logger?.warn(
+      'Anthropic OAuth token is stored as raw value. Use env var reference (e.g. "$CLAUDE_OAUTH_TOKEN") instead.'
     );
   }
   return config;

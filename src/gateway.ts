@@ -135,23 +135,19 @@ export class ClaudeclawGateway {
       );
     }
 
-    // 4. Initialize Claude client (if API key is configured)
-    if (this.config.anthropic?.apiKey) {
-      try {
-        this.claudeClient = new ClaudeClient(
-          this.config.anthropic,
-          this.logger
-        );
-        this.logger.info("Claude API client initialized");
-      } catch (err) {
-        this.logger.warn("Claude client not available, using echo mode", {
-          error: String(err),
-        });
-      }
-    } else {
+    // 4. Initialize Claude client (tries: config authToken → config apiKey → Claude Code keychain)
+    try {
+      this.claudeClient = new ClaudeClient(
+        this.config.anthropic,
+        this.logger
+      );
+      this.logger.info("Claude API client initialized");
+    } catch (err) {
       this.logger.warn(
-        "No Anthropic API key configured — running in echo mode. " +
-        "Set anthropic.apiKey in config or $ANTHROPIC_API_KEY env var."
+        "Claude client not available, using echo mode. " +
+        "Set anthropic.authToken or anthropic.apiKey in config, " +
+        "use env vars, or log in with Claude Code (claude login).",
+        { error: String(err) }
       );
     }
 

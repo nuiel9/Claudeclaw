@@ -424,6 +424,8 @@ export interface ClaudeclawConfig {
 export interface AnthropicConfig {
   /** API key or env var reference (e.g. "$ANTHROPIC_API_KEY") */
   apiKey: string;
+  /** OAuth token or env var reference (e.g. "$CLAUDE_OAUTH_TOKEN"). Used instead of apiKey when set. */
+  authToken?: string;
   /** Default model for agents that don't specify one */
   defaultModel: ModelId;
   /** Max tokens for completion responses */

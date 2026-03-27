@@ -4,12 +4,15 @@ import { Command } from "commander";
 import { createLogger } from "../core/logger.js";
 import { loadConfig, saveConfig, getConfigDir } from "../config/config-loader.js";
 import { ClaudeclawGateway } from "../gateway.js";
-import { copyFile, mkdir, access } from "node:fs/promises";
+import { runConfigure } from "./configure.js";
+import { copyFile, mkdir, access, writeFile, readFile, unlink } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, "../../templates");
+const PID_FILE = join(homedir(), ".claudeclaw", "claudeclaw.pid");
 
 const program = new Command();
 
@@ -69,6 +72,22 @@ program
     logger.info("  3. Run: claudeclaw start");
   });
 
+// --- Configure ---
+program
+  .command("configure")
+  .alias("config")
+  .description("Interactive walkthrough to configure Claudeclaw")
+  .action(async () => {
+    const logger = createLogger("configure");
+    const config = await loadConfig(logger);
+    const updated = await runConfigure(config, logger);
+    await saveConfig(updated, logger);
+    logger.info("Configuration saved!");
+    logger.info(`Config file: ${getConfigDir()}/claudeclaw.json`);
+    logger.info("");
+    logger.info("Run 'claudeclaw start' to launch the gateway.");
+  });
+
 // --- Start ---
 program
   .command("start")
@@ -83,10 +102,14 @@ program
     const config = await loadConfig(logger);
     const gateway = new ClaudeclawGateway(config, logger);
 
+    // Write PID file
+    await writeFile(PID_FILE, String(process.pid), "utf-8");
+
     // Handle shutdown
     const shutdown = async () => {
       logger.info("Shutting down...");
       await gateway.stop();
+      try { await unlink(PID_FILE); } catch {}
       process.exit(0);
     };
 
@@ -94,6 +117,36 @@ program
     process.on("SIGTERM", shutdown);
 
     await gateway.start();
+  });
+
+// --- Stop ---
+program
+  .command("stop")
+  .description("Stop the running Claudeclaw gateway")
+  .action(async () => {
+    const logger = createLogger("stop");
+
+    try {
+      await access(PID_FILE);
+    } catch {
+      logger.info("No running Claudeclaw gateway found (no PID file)");
+      return;
+    }
+
+    const pid = parseInt(await readFile(PID_FILE, "utf-8"), 10);
+
+    try {
+      process.kill(pid, "SIGTERM");
+      logger.info(`Sent SIGTERM to Claudeclaw gateway (PID ${pid})`);
+    } catch (err: any) {
+      if (err.code === "ESRCH") {
+        logger.warn(`Process ${pid} not found — cleaning up stale PID file`);
+      } else {
+        logger.error(`Failed to stop process ${pid}`, { error: String(err) });
+      }
+    }
+
+    try { await unlink(PID_FILE); } catch {}
   });
 
 // --- Agents ---
