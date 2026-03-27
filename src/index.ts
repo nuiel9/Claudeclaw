@@ -9,7 +9,7 @@ export { ClaudeclawEventBus, globalEventBus } from "./core/events.js";
 export { createLogger } from "./core/logger.js";
 
 // Config
-export { loadConfig, saveConfig, getConfigDir } from "./config/config-loader.js";
+export { loadConfig, saveConfig, getConfigDir, detectDuplicateTokens } from "./config/config-loader.js";
 
 // Agent Workspace & Soul
 export {
@@ -38,6 +38,9 @@ export { AgentRegistry } from "./agents/registry/agent-registry.js";
 // Agent Communication
 export { AgentCommHub } from "./agents/communication/agent-comm.js";
 
+// Claude API Client
+export { ClaudeClient, type ClaudeRequestOptions, type ClaudeResponse } from "./agents/claude-client.js";
+
 // Sessions
 export {
   MemorySessionStore,
@@ -60,6 +63,19 @@ export { ConsensusEngine } from "./consensus/consensus-engine.js";
 export { TelegramChannel } from "./channels/telegram/telegram-channel.js";
 export { DiscordChannel } from "./channels/discord/discord-channel.js";
 export { ChannelManager } from "./channels/plugins/channel-manager.js";
+
+// Security
+export {
+  isAllowed,
+  isToolAllowed,
+  resolveToolPolicy,
+  verifyWebhookSignature,
+  verifyTelegramSecret,
+  SessionWriteLock,
+  ExecApprovalManager,
+  FilesystemSandbox,
+} from "./security/index.js";
+export { RateLimiter, type RateLimitConfig, type RateLimitResult } from "./security/rate-limiter.js";
 
 // Observability
 export { Tracer } from "./observability/tracer.js";

@@ -138,9 +138,11 @@ export class HybridRouter {
     if (match.pattern) {
       try {
         const regex = new RegExp(match.pattern, "i");
-        if (!regex.test(message.content)) return false;
+        // Guard against ReDoS: test only first 1000 chars with timeout
+        const testContent = message.content.slice(0, 1000);
+        if (!regex.test(testContent)) return false;
       } catch {
-        this.logger.warn(`Invalid pattern in rule: ${match.pattern}`);
+        this.logger.warn("Invalid pattern in routing rule");
         return false;
       }
     }

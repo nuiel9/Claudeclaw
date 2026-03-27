@@ -8,6 +8,13 @@ type MessageHandler = (message: AgentMessage) => Promise<void>;
  * Agent Communication Hub
  * Supports: direct send, yield, broadcast, pub/sub
  */
+export interface CommAuthPolicy {
+  /** Set of registered agent IDs that can communicate */
+  registeredAgents: Set<string>;
+  /** Allowlist: agentId -> set of agents it can send to (empty = all) */
+  allowlist?: Map<string, Set<string>>;
+}
+
 export class AgentCommHub {
   private handlers = new Map<string, MessageHandler[]>();
   private topics = new Map<string, PubSubTopic>();
@@ -22,10 +29,36 @@ export class AgentCommHub {
   private blackboard = new Map<string, unknown>();
   private eventBus: ClaudeclawEventBus;
   private logger: Logger;
+  private authPolicy?: CommAuthPolicy;
 
-  constructor(eventBus: ClaudeclawEventBus, logger: Logger) {
+  constructor(eventBus: ClaudeclawEventBus, logger: Logger, authPolicy?: CommAuthPolicy) {
     this.eventBus = eventBus;
     this.logger = logger;
+    this.authPolicy = authPolicy;
+  }
+
+  /**
+   * Update auth policy (e.g. when agents are registered/unregistered)
+   */
+  setAuthPolicy(policy: CommAuthPolicy): void {
+    this.authPolicy = policy;
+  }
+
+  private assertAuthorized(from: string, to: string): void {
+    if (!this.authPolicy) return;
+
+    if (!this.authPolicy.registeredAgents.has(from)) {
+      throw new Error(`Unauthorized sender: ${from}`);
+    }
+    if (to !== "*" && !this.authPolicy.registeredAgents.has(to)) {
+      throw new Error(`Unknown recipient: ${to}`);
+    }
+    if (this.authPolicy.allowlist) {
+      const allowed = this.authPolicy.allowlist.get(from);
+      if (allowed && to !== "*" && !allowed.has(to)) {
+        throw new Error(`Agent ${from} not authorized to send to ${to}`);
+      }
+    }
   }
 
   // --- Direct Messaging ---
@@ -38,6 +71,8 @@ export class AgentCommHub {
     to: string,
     payload: unknown
   ): Promise<void> {
+    this.assertAuthorized(from, to);
+
     const message: AgentMessage = {
       from,
       to,
@@ -78,6 +113,7 @@ export class AgentCommHub {
     payload: unknown,
     timeoutMs: number = 120_000
   ): Promise<AgentMessage> {
+    this.assertAuthorized(from, to);
     const correlationId = uuid();
 
     const message: AgentMessage = {

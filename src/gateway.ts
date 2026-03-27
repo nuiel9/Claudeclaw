@@ -2,10 +2,11 @@ import type {
   ClaudeclawConfig,
   InboundMessage,
   Logger,
+  BootstrapFile,
 } from "./core/types.js";
 import { ClaudeclawEventBus } from "./core/events.js";
 import { AgentRegistry } from "./agents/registry/agent-registry.js";
-import { AgentCommHub } from "./agents/communication/agent-comm.js";
+import { AgentCommHub, type CommAuthPolicy } from "./agents/communication/agent-comm.js";
 import { HybridRouter } from "./router/hybrid-router.js";
 import { WorkflowEngine } from "./flows/workflow-engine.js";
 import { ConsensusEngine } from "./consensus/consensus-engine.js";
@@ -19,6 +20,15 @@ import {
   buildSessionKey,
   addMessageToSession,
 } from "./sessions/session-store.js";
+import {
+  SessionWriteLock,
+  ExecApprovalManager,
+  resolveToolPolicy,
+  isToolAllowed,
+} from "./security/index.js";
+import { RateLimiter } from "./security/rate-limiter.js";
+import { detectDuplicateTokens } from "./config/config-loader.js";
+import { ClaudeClient } from "./agents/claude-client.js";
 
 /**
  * Main Claudeclaw Gateway
@@ -47,6 +57,16 @@ export class ClaudeclawGateway {
   private tracer: Tracer;
   private sessionStore: MemorySessionStore;
 
+  // Security systems
+  private sessionWriteLock: SessionWriteLock;
+  private execApprovalManager: ExecApprovalManager;
+  private rateLimiter: RateLimiter;
+
+  // LLM
+  private claudeClient: ClaudeClient | null = null;
+  private bootstrapFiles: BootstrapFile[] = [];
+  private systemPrompts = new Map<string, string>();
+
   constructor(config: ClaudeclawConfig, logger: Logger) {
     this.config = config;
     this.logger = logger;
@@ -55,7 +75,19 @@ export class ClaudeclawGateway {
     this.eventBus = new ClaudeclawEventBus(logger);
     this.sessionStore = new MemorySessionStore();
     this.agentRegistry = new AgentRegistry(this.eventBus, logger);
-    this.commHub = new AgentCommHub(this.eventBus, logger);
+
+    // Initialize CommHub with auth policy wired from agent config
+    const registeredAgents = new Set(Object.keys(config.agents));
+    const commAuthPolicy: CommAuthPolicy = { registeredAgents };
+    this.commHub = new AgentCommHub(this.eventBus, logger, commAuthPolicy);
+
+    // Initialize security systems
+    this.sessionWriteLock = new SessionWriteLock();
+    this.execApprovalManager = new ExecApprovalManager(logger);
+    this.rateLimiter = new RateLimiter(undefined, logger);
+
+    // Detect duplicate tokens across channels
+    detectDuplicateTokens(config, logger);
     this.workflowEngine = new WorkflowEngine(this.eventBus, logger);
     this.consensusEngine = new ConsensusEngine(this.eventBus, logger);
     this.channelManager = new ChannelManager(logger, this.sessionStore);
@@ -85,36 +117,52 @@ export class ClaudeclawGateway {
       `Registered ${this.agentRegistry.listAgents().length} agents`
     );
 
-    // 2. Load bootstrap files for default agent
-    const bootstrapFiles = await loadBootstrapFiles(
+    // 2. Load bootstrap files for workspace
+    this.bootstrapFiles = await loadBootstrapFiles(
       this.config.workspace.path,
       { logger: this.logger }
     );
 
-    // 3. Build system prompt for default agent
-    const defaultAgent = this.config.agents[this.config.defaultAgent];
-    if (defaultAgent) {
+    // 3. Build system prompts for all agents
+    for (const agent of Object.values(this.config.agents)) {
       const systemPrompt = buildAgentSystemPrompt({
-        agent: defaultAgent,
-        bootstrapFiles,
+        agent,
+        bootstrapFiles: this.bootstrapFiles,
       });
+      this.systemPrompts.set(agent.id, systemPrompt);
       this.logger.info(
-        `System prompt built: ${systemPrompt.length} chars`
+        `System prompt built for ${agent.id}: ${systemPrompt.length} chars`
       );
     }
 
-    // 4. Initialize channels
+    // 4. Initialize Claude client (tries: config authToken → config apiKey → Claude Code keychain)
+    try {
+      this.claudeClient = new ClaudeClient(
+        this.config.anthropic,
+        this.logger
+      );
+      this.logger.info("Claude API client initialized");
+    } catch (err) {
+      this.logger.warn(
+        "Claude client not available, using echo mode. " +
+        "Set anthropic.authToken or anthropic.apiKey in config, " +
+        "use env vars, or log in with Claude Code (claude login).",
+        { error: String(err) }
+      );
+    }
+
+    // 5. Initialize channels
     await this.channelManager.initialize(this.config);
 
-    // 5. Set up message routing
+    // 6. Set up message routing
     this.channelManager.onMessage(async (message) => {
       await this.handleInboundMessage(message);
     });
 
-    // 6. Start all channels
+    // 7. Start all channels
     await this.channelManager.startAll(this.config.defaultAgent);
 
-    // 7. Set up event listeners
+    // 8. Set up event listeners
     this.setupEventListeners();
 
     this.logger.info("Claudeclaw Gateway started successfully");
@@ -141,6 +189,15 @@ export class ClaudeclawGateway {
   private async handleInboundMessage(
     message: InboundMessage
   ): Promise<void> {
+    // Multi-tier rate limiting (per-sender, per-channel, global)
+    const rateResult = this.rateLimiter.check(message.senderId, message.chatId);
+    if (rateResult.limited) {
+      this.logger.warn(
+        `Rate limited (${rateResult.tier}): ${message.senderId} (${message.senderName}), retry after ${rateResult.retryAfterMs}ms`
+      );
+      return;
+    }
+
     // Start trace
     const trace = this.tracer.startTrace(
       "gateway",
@@ -165,7 +222,7 @@ export class ClaudeclawGateway {
         `Routed to agent: ${routeResult.agentId} (confidence: ${routeResult.confidence})`
       );
 
-      // Get or create session
+      // Get or create session (with write lock to prevent race conditions)
       const sessionKey = buildSessionKey({
         agentId: routeResult.agentId,
         channel: message.channel,
@@ -173,24 +230,27 @@ export class ClaudeclawGateway {
         peerId: message.senderId,
       });
 
-      let session = await this.sessionStore.get(sessionKey);
-      if (!session) {
-        session = createSession(
-          routeResult.agentId,
-          sessionKey,
-          message.channel,
-          message.senderId
-        );
-      }
-
-      // Add message to session
-      addMessageToSession(session, "user", message.content, {
-        channel: message.channel,
-        senderId: message.senderId,
-        senderName: message.senderName,
-      });
-
-      await this.sessionStore.set(sessionKey, session);
+      const session = await this.sessionWriteLock.withLock(
+        sessionKey,
+        async () => {
+          let s = await this.sessionStore.get(sessionKey);
+          if (!s) {
+            s = createSession(
+              routeResult.agentId,
+              sessionKey,
+              message.channel,
+              message.senderId
+            );
+          }
+          addMessageToSession(s, "user", message.content, {
+            channel: message.channel,
+            senderId: message.senderId,
+            senderName: message.senderName,
+          });
+          await this.sessionStore.set(sessionKey, s);
+          return s;
+        }
+      );
 
       // Emit event
       this.eventBus.emit("message:received", {
@@ -198,19 +258,53 @@ export class ClaudeclawGateway {
         message,
       });
 
-      // Process with agent (placeholder for LLM integration)
+      // Process with agent via Claude API
       const agentSpan = this.tracer.startSpan(
         trace.traceId,
         routeResult.agentId,
         "process"
       );
 
-      // TODO: Integrate with actual LLM (Claude API) here
-      // For now, echo back with agent info
-      const responseContent =
-        `[${routeResult.agentId}] Received: "${message.content.slice(0, 100)}"` +
-        `\n\nI'm ${routeResult.agentId}, routed via ${routeResult.reason ?? "default"}. ` +
-        `This is where the LLM response would be generated.`;
+      let responseContent: string;
+
+      if (this.claudeClient) {
+        try {
+          const agent = this.config.agents[routeResult.agentId];
+          const systemPrompt = this.systemPrompts.get(routeResult.agentId);
+
+          const claudeResponse = await this.claudeClient.sendMessage(
+            session,
+            message.content,
+            {
+              model: agent?.model,
+              systemPrompt,
+            }
+          );
+
+          responseContent = claudeResponse.content;
+
+          this.tracer.addEvent(agentSpan, "llm_response", {
+            model: claudeResponse.model,
+            inputTokens: claudeResponse.inputTokens,
+            outputTokens: claudeResponse.outputTokens,
+            stopReason: claudeResponse.stopReason,
+          });
+        } catch (err) {
+          this.logger.error("Claude API call failed, falling back to echo", {
+            error: String(err),
+            agentId: routeResult.agentId,
+          });
+          responseContent =
+            `[${routeResult.agentId}] Sorry, I encountered an error processing your message. ` +
+            `Please try again later.`;
+        }
+      } else {
+        // Echo mode (no API key configured)
+        responseContent =
+          `[${routeResult.agentId}] Received: "${message.content.slice(0, 100)}"` +
+          `\n\nI'm ${routeResult.agentId}, routed via ${routeResult.reason ?? "default"}. ` +
+          `Claude API is not configured — running in echo mode.`;
+      }
 
       this.tracer.endSpan(agentSpan);
 
@@ -291,5 +385,9 @@ export class ClaudeclawGateway {
 
   getTracer(): Tracer {
     return this.tracer;
+  }
+
+  getClaudeClient(): ClaudeClient | null {
+    return this.claudeClient;
   }
 }

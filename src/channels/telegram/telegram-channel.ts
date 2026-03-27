@@ -10,6 +10,7 @@ import type {
   TelegramConfig,
   Logger,
 } from "../../core/types.js";
+import { isAllowed } from "../../security/index.js";
 
 const TELEGRAM_MAX_MESSAGE = 4096;
 const TELEGRAM_CHUNK_SIZE = 4000;
@@ -47,17 +48,41 @@ export class TelegramChannel implements ChannelPlugin<TelegramConfig> {
   async start(ctx: ChannelContext): Promise<void> {
     this.logger = ctx.logger;
 
-    if (!this.config.token) {
-      throw new Error("Telegram token is required");
+    // Resolve token: support env var references (e.g. "$TELEGRAM_TOKEN")
+    const token = resolveToken(this.config.token);
+    if (!token) {
+      throw new Error(
+        "Telegram token is required. Set via config or env var (e.g. $TELEGRAM_TOKEN)"
+      );
     }
 
     // Dynamic import grammY to avoid bundling issues
     const { Bot } = await import("grammy");
-    this.bot = new Bot(this.config.token);
+    this.bot = new Bot(token);
 
     // Register message handler
     this.bot.on("message", async (grammyCtx: any) => {
       const message = this.transformInbound(grammyCtx);
+
+      // Enforce access control (allowlist / group policy)
+      const chatType = grammyCtx.message.chat.type === "private" ? "dm" : "group";
+      if (
+        !isAllowed(
+          message.senderId,
+          chatType as "dm" | "group",
+          {
+            allowFrom: this.config.allowFrom,
+            groupPolicy: this.config.groupPolicy,
+          },
+          this.logger
+        )
+      ) {
+        this.logger?.info(
+          `Access denied for ${message.senderName} (${message.senderId}) in ${chatType}`
+        );
+        return;
+      }
+
       for (const handler of this.handlers) {
         try {
           await handler(message);
@@ -275,4 +300,16 @@ function chunkText(text: string, maxLength: number): string[] {
   }
 
   return chunks;
+}
+
+/**
+ * Resolve token value: supports env var references prefixed with $
+ */
+function resolveToken(value: string): string | undefined {
+  if (!value) return undefined;
+  if (value.startsWith("$")) {
+    const envKey = value.slice(1);
+    return process.env[envKey] || undefined;
+  }
+  return value;
 }

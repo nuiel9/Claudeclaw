@@ -8,6 +8,7 @@ import type {
 import { DEFAULT_AGENT_CAPABILITIES } from "../../core/types.js";
 import { v4 as uuid } from "uuid";
 import { ClaudeclawEventBus } from "../../core/events.js";
+import { resolveToolPolicy, isToolAllowed, type ToolPolicy } from "../../security/index.js";
 
 /**
  * Central registry for all agents and their subagent runs
@@ -15,6 +16,7 @@ import { ClaudeclawEventBus } from "../../core/events.js";
 export class AgentRegistry {
   private agents = new Map<string, AgentDefinition>();
   private runs = new Map<string, SubagentRunRecord>();
+  private toolPolicies = new Map<string, ToolPolicy>();
   private eventBus: ClaudeclawEventBus;
   private logger: Logger;
 
@@ -31,7 +33,39 @@ export class AgentRegistry {
       ...agent.capabilities,
     };
     this.agents.set(agent.id, agent);
-    this.logger.info(`Agent registered: ${agent.id} (${agent.name})`);
+
+    // Resolve and cache tool policy for this agent
+    const policy = resolveToolPolicy(agent.tools);
+    this.toolPolicies.set(agent.id, policy);
+    this.logger.info(
+      `Agent registered: ${agent.id} (${agent.name}), tool policy: ${policy.mode}` +
+        (policy.tools.length > 0 ? ` [${policy.tools.join(", ")}]` : "")
+    );
+  }
+
+  /**
+   * Check if a tool is allowed for an agent (runtime enforcement)
+   */
+  isToolAllowedForAgent(agentId: string, toolName: string): boolean {
+    const policy = this.toolPolicies.get(agentId);
+    if (!policy) {
+      this.logger.warn(`No tool policy for agent: ${agentId}, denying`);
+      return false;
+    }
+    const allowed = isToolAllowed(toolName, policy);
+    if (!allowed) {
+      this.logger.warn(
+        `Tool denied for agent ${agentId}: ${toolName} (policy: ${policy.mode})`
+      );
+    }
+    return allowed;
+  }
+
+  /**
+   * Get tool policy for an agent
+   */
+  getToolPolicy(agentId: string): ToolPolicy | undefined {
+    return this.toolPolicies.get(agentId);
   }
 
   unregisterAgent(agentId: string): void {
