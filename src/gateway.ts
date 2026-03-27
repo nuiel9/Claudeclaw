@@ -25,6 +25,8 @@ import {
   resolveToolPolicy,
   isToolAllowed,
 } from "./security/index.js";
+import { RateLimiter } from "./security/rate-limiter.js";
+import { detectDuplicateTokens } from "./config/config-loader.js";
 
 /**
  * Main Claudeclaw Gateway
@@ -56,11 +58,7 @@ export class ClaudeclawGateway {
   // Security systems
   private sessionWriteLock: SessionWriteLock;
   private execApprovalManager: ExecApprovalManager;
-
-  // Rate limiting: per-sender sliding window
-  private rateLimitWindow = new Map<string, number[]>();
-  private static readonly RATE_LIMIT_MAX = 30; // max messages per window
-  private static readonly RATE_LIMIT_WINDOW_MS = 60_000; // 60 seconds
+  private rateLimiter: RateLimiter;
 
   constructor(config: ClaudeclawConfig, logger: Logger) {
     this.config = config;
@@ -79,6 +77,10 @@ export class ClaudeclawGateway {
     // Initialize security systems
     this.sessionWriteLock = new SessionWriteLock();
     this.execApprovalManager = new ExecApprovalManager(logger);
+    this.rateLimiter = new RateLimiter(undefined, logger);
+
+    // Detect duplicate tokens across channels
+    detectDuplicateTokens(config, logger);
     this.workflowEngine = new WorkflowEngine(this.eventBus, logger);
     this.consensusEngine = new ConsensusEngine(this.eventBus, logger);
     this.channelManager = new ChannelManager(logger, this.sessionStore);
@@ -164,9 +166,12 @@ export class ClaudeclawGateway {
   private async handleInboundMessage(
     message: InboundMessage
   ): Promise<void> {
-    // Rate limiting per sender
-    if (this.isRateLimited(message.senderId)) {
-      this.logger.warn(`Rate limited: ${message.senderId} (${message.senderName})`);
+    // Multi-tier rate limiting (per-sender, per-channel, global)
+    const rateResult = this.rateLimiter.check(message.senderId, message.chatId);
+    if (rateResult.limited) {
+      this.logger.warn(
+        `Rate limited (${rateResult.tier}): ${message.senderId} (${message.senderName}), retry after ${rateResult.retryAfterMs}ms`
+      );
       return;
     }
 
@@ -301,30 +306,6 @@ export class ClaudeclawGateway {
         `Workflow completed: ${event.workflowId} (status: ${event.status})`
       );
     });
-  }
-
-  // --- Rate Limiting ---
-
-  private isRateLimited(senderId: string): boolean {
-    const now = Date.now();
-    const windowStart = now - ClaudeclawGateway.RATE_LIMIT_WINDOW_MS;
-
-    let timestamps = this.rateLimitWindow.get(senderId);
-    if (!timestamps) {
-      timestamps = [];
-      this.rateLimitWindow.set(senderId, timestamps);
-    }
-
-    // Remove expired timestamps
-    const filtered = timestamps.filter((t) => t > windowStart);
-    this.rateLimitWindow.set(senderId, filtered);
-
-    if (filtered.length >= ClaudeclawGateway.RATE_LIMIT_MAX) {
-      return true;
-    }
-
-    filtered.push(now);
-    return false;
   }
 
   // --- Public Accessors ---

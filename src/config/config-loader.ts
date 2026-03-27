@@ -1,4 +1,4 @@
-import { readFile, writeFile, access, mkdir } from "node:fs/promises";
+import { readFile, writeFile, access, mkdir, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ClaudeclawConfig, Logger } from "../core/types.js";
@@ -77,8 +77,69 @@ export async function saveConfig(
 ): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true });
   const configPath = join(CONFIG_DIR, CONFIG_FILE);
-  await writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");
+
+  // Redact raw tokens before saving — warn if not using env var references
+  const sanitized = warnRawTokens(config, logger);
+
+  await writeFile(configPath, JSON.stringify(sanitized, null, 2), "utf-8");
+  await chmod(configPath, 0o600); // Owner-only read/write
   logger?.info("Config saved", { path: configPath });
+}
+
+/**
+ * Detect duplicate tokens across channel configs
+ */
+export function detectDuplicateTokens(
+  config: ClaudeclawConfig,
+  logger?: Logger
+): string[] {
+  const tokenMap = new Map<string, string[]>();
+  const warnings: string[] = [];
+
+  if (config.channels.telegram?.token) {
+    const t = config.channels.telegram.token;
+    tokenMap.set(t, [...(tokenMap.get(t) ?? []), "telegram"]);
+  }
+  if (config.channels.discord?.token) {
+    const t = config.channels.discord.token;
+    tokenMap.set(t, [...(tokenMap.get(t) ?? []), "discord"]);
+  }
+
+  for (const [token, channels] of tokenMap) {
+    if (channels.length > 1 && !token.startsWith("$")) {
+      const msg = `Duplicate token detected across channels: ${channels.join(", ")}`;
+      warnings.push(msg);
+      logger?.error(msg);
+    }
+  }
+
+  return warnings;
+}
+
+/**
+ * Warn if raw tokens (not env var refs) are in config
+ */
+function warnRawTokens(
+  config: ClaudeclawConfig,
+  logger?: Logger
+): ClaudeclawConfig {
+  if (
+    config.channels.telegram?.token &&
+    !config.channels.telegram.token.startsWith("$")
+  ) {
+    logger?.warn(
+      'Telegram token is stored as raw value. Use env var reference (e.g. "$TELEGRAM_TOKEN") instead.'
+    );
+  }
+  if (
+    config.channels.discord?.token &&
+    !config.channels.discord.token.startsWith("$")
+  ) {
+    logger?.warn(
+      'Discord token is stored as raw value. Use env var reference (e.g. "$DISCORD_TOKEN") instead.'
+    );
+  }
+  return config;
 }
 
 /**

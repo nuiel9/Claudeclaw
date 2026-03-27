@@ -9,7 +9,7 @@ export { ClaudeclawEventBus, globalEventBus } from "./core/events.js";
 export { createLogger } from "./core/logger.js";
 
 // Config
-export { loadConfig, saveConfig, getConfigDir } from "./config/config-loader.js";
+export { loadConfig, saveConfig, getConfigDir, detectDuplicateTokens } from "./config/config-loader.js";
 
 // Agent Workspace & Soul
 export {
@@ -72,6 +72,7 @@ export {
   ExecApprovalManager,
   FilesystemSandbox,
 } from "./security/index.js";
+export { RateLimiter, type RateLimitConfig, type RateLimitResult } from "./security/rate-limiter.js";
 
 // Observability
 export { Tracer } from "./observability/tracer.js";

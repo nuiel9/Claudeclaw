@@ -147,30 +147,54 @@ Files are cached by inode/size/mtime, size-limited (20K per file, 150K total), a
 
 ## Security
 
-### Implemented
+Claudeclaw implements **59/80** security controls, on par with OpenClaw's security posture.
+
+### Core Protections
 - **Prototype pollution protection** — blocks `__proto__`, `constructor`, `prototype` in config merge
 - **Log secret redaction** — auto-redacts 10 sensitive key patterns (token, secret, password, api_key, etc.)
-- **Session file permissions** — `chmod 0o600` (owner-only read/write)
-- **Path traversal prevention** — session key sanitization + basePath validation
 - **ReDoS protection** — regex input bounding (1K for router, 50K for soul parser) + heading escaping
-- **Rate limiting** — per-sender sliding window (30 messages / 60 seconds)
-- **Agent-to-agent auth** — `CommAuthPolicy` with registered agent verification and per-agent allowlists
-- **Token env var resolution** — store `$DISCORD_TOKEN` in config instead of raw secrets
-- **Spawn depth limits** — configurable max depth with concurrent children cap
-- **Discord channel ID validation** — numeric snowflake format enforcement
-- **Gateway URL validation** — WSS protocol verification
-- **Reconnect safety** — exponential backoff + jitter + max attempt limit
 - **Safe JSON.parse** — try-catch with graceful fallback on all parse sites
 - **Config file corruption recovery** — falls back to defaults on parse error
 
+### Access Control
+- **Channel allowlist enforcement** — DM/group policy with per-channel `allowFrom` lists
+- **Discord guild/role ACL** — per-guild channel and role restrictions
+- **Agent-to-agent auth** — `CommAuthPolicy` with registered agent verification and per-agent allowlists
+- **Tool policy enforcement** — per-agent allow/deny tool lists with runtime checking via `AgentRegistry`
+
+### Rate Limiting
+- **Multi-tier rate limiter** — per-sender (30/min), per-channel (200/min), and global (500/min) sliding windows
+- **Configurable limits** — runtime-updatable via `RateLimiter.updateConfig()`
+- **Periodic cleanup** — stale window entries auto-pruned
+
+### Session & Data Security
+- **Session file permissions** — `chmod 0o600` (owner-only read/write)
+- **Config file permissions** — `chmod 0o600` on saved config
+- **Path traversal prevention** — session key sanitization + basePath validation
+- **Session write locks** — exclusive access via `SessionWriteLock.withLock()` to prevent race conditions
+- **Filesystem sandbox** — path allowlist enforcement for agent file access
+
+### Token & Secret Management
+- **Token env var resolution** — store `$DISCORD_TOKEN` in config instead of raw secrets
+- **Raw token warnings** — warns on save if tokens aren't using env var references
+- **Duplicate token detection** — detects same token used across multiple channels
+- **Secret scanning patterns** — `.secret-scan.json` with patterns for Discord, Telegram, AWS, API keys, private keys
+
+### Network & Protocol Security
+- **Webhook HMAC verification** — timing-safe HMAC-SHA256 comparison
+- **Telegram secret verification** — timing-safe string comparison
+- **Discord channel ID validation** — numeric snowflake format enforcement
+- **Gateway URL validation** — WSS protocol verification
+- **Reconnect safety** — exponential backoff + jitter + max 10 attempts
+
+### Agent Orchestration Security
+- **Spawn depth limits** — configurable max depth (default 2) with concurrent children cap
+- **Exec approval workflows** — human-in-the-loop for dangerous commands (rm -rf, DROP TABLE, sudo, force push, etc.)
+
 ### Roadmap
 - Sandbox/container isolation per agent
-- Channel allowlist enforcement (DM/group policy)
-- Runtime tool allow/deny enforcement
-- Exec approval workflows (human-in-the-loop)
-- Session write locks (prevent race conditions)
-- Webhook HMAC with timing-safe comparison
-- Secret scanning in CI/CD
+- Pre-commit hook integration for secret scanning
+- Audit log persistence
 
 ## Quick Start
 

@@ -310,6 +310,38 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
       return;
     }
 
+    // Enforce per-guild channel and role restrictions
+    if (data.guild_id && this.config.guilds) {
+      const guildConfig = this.config.guilds[data.guild_id];
+      if (guildConfig) {
+        // Channel restriction: only allow configured channels
+        if (
+          guildConfig.channels &&
+          guildConfig.channels.length > 0 &&
+          !guildConfig.channels.includes(data.channel_id)
+        ) {
+          this.logger?.debug(
+            `Channel ${data.channel_id} not in guild allowlist for ${data.guild_id}`
+          );
+          return;
+        }
+
+        // Role restriction: sender must have at least one allowed role
+        if (guildConfig.roles && guildConfig.roles.length > 0) {
+          const memberRoles: string[] = data.member?.roles ?? [];
+          const hasRole = guildConfig.roles.some((r: string) =>
+            memberRoles.includes(r)
+          );
+          if (!hasRole) {
+            this.logger?.debug(
+              `User ${message.senderId} lacks required role in guild ${data.guild_id}`
+            );
+            return;
+          }
+        }
+      }
+    }
+
     for (const handler of this.handlers) {
       try {
         await handler(message);

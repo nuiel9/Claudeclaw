@@ -3,8 +3,28 @@ dist/
 *.js.map
 *.d.ts
 !src/**/*.d.ts
-.env
-.env.*
-*.log
 .DS_Store
 coverage/
+
+# Secrets & credentials
+.env
+.env.*
+.env.local
+.env.production
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials.json
+service-account*.json
+secrets.json
+token.json
+
+# Config with potential secrets
+claudeclaw.json
+
+# Logs (may contain sensitive data)
+*.log
+logs/
