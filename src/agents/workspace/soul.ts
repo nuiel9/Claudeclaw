@@ -119,11 +119,15 @@ function stripFrontMatter(content: string): string {
 }
 
 function extractSection(content: string, heading: string): string {
+  // Escape regex special chars in heading to prevent injection
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(
-    `## ${heading}\\s*\\n([\\s\\S]*?)(?=\\n## |$)`,
+    `## ${escapedHeading}\\s*\\n([\\s\\S]*?)(?=\\n## |$)`,
     "i"
   );
-  const match = content.match(regex);
+  // Limit content to prevent ReDoS on very large files
+  const bounded = content.slice(0, 50_000);
+  const match = bounded.match(regex);
   return match ? match[1].trim() : "";
 }
 
@@ -140,7 +144,8 @@ function parseKeyValueSection(section: string): Record<string, string> {
   const result: Record<string, string> = {};
   if (!section) return result;
 
-  for (const line of section.split("\n")) {
+  for (let line of section.split("\n")) {
+    if (line.length > 1000) line = line.slice(0, 1000);
     const match = line.match(/^[-*]?\s*\*\*(.+?)\*\*:\s*(.+)/);
     if (match) {
       result[match[1].trim()] = match[2].trim();

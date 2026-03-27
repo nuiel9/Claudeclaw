@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, readdir, unlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, readdir, unlink, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import type { Session, SessionStore, SessionMessage, Logger } from "../core/types.js";
 import { v4 as uuid } from "uuid";
@@ -47,7 +47,14 @@ export class FileSessionStore implements SessionStore {
     try {
       const filePath = this.sessionPath(key);
       const data = await readFile(filePath, "utf-8");
-      const session = JSON.parse(data) as Session;
+      let session: Session;
+      try {
+        session = JSON.parse(data) as Session;
+      } catch {
+        this.logger?.warn(`Corrupted session file for key: ${key}, removing`);
+        await this.delete(key);
+        return undefined;
+      }
       session.createdAt = new Date(session.createdAt);
       session.lastActiveAt = new Date(session.lastActiveAt);
       this.cache.set(key, session);
@@ -62,6 +69,7 @@ export class FileSessionStore implements SessionStore {
     await mkdir(this.basePath, { recursive: true });
     const filePath = this.sessionPath(key);
     await writeFile(filePath, JSON.stringify(session, null, 2), "utf-8");
+    await chmod(filePath, 0o600); // Owner read/write only
   }
 
   async delete(key: string): Promise<void> {
@@ -91,8 +99,13 @@ export class FileSessionStore implements SessionStore {
   }
 
   private sessionPath(key: string): string {
-    const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_");
-    return join(this.basePath, `${safeKey}.json`);
+    const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 200);
+    const resolved = join(this.basePath, `${safeKey}.json`);
+    // Ensure resolved path is within basePath (prevent traversal)
+    if (!resolved.startsWith(this.basePath)) {
+      throw new Error("Invalid session key: path traversal detected");
+    }
+    return resolved;
   }
 }
 

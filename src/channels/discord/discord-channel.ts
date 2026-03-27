@@ -48,6 +48,9 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
   private sessionId: string | null = null;
   private resumeGatewayUrl: string | null = null;
   private token: string = "";
+  private reconnectAttempts = 0;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 10;
+  private static readonly GATEWAY_CONNECT_TIMEOUT_MS = 15_000;
 
   constructor(config: DiscordConfig) {
     this.config = config;
@@ -55,10 +58,13 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
 
   async start(ctx: ChannelContext): Promise<void> {
     this.logger = ctx.logger;
-    this.token = this.config.token;
 
+    // Resolve token: support env var references (e.g. "$DISCORD_TOKEN")
+    this.token = resolveToken(this.config.token) ?? "";
     if (!this.token) {
-      throw new Error("Discord token is required");
+      throw new Error(
+        "Discord token is required. Set via config or env var (e.g. $DISCORD_TOKEN)"
+      );
     }
 
     // Get gateway URL
@@ -99,6 +105,11 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
           body.flags = 1 << 12; // SUPPRESS_NOTIFICATIONS
         }
 
+        // Validate chatId format (Discord snowflake IDs are numeric)
+        if (!/^\d{1,20}$/.test(message.chatId)) {
+          throw new Error("Invalid Discord channel ID format");
+        }
+
         const response = await this.apiRequest(
           "POST",
           `/channels/${message.chatId}/messages`,
@@ -128,20 +139,45 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
   }
 
   private async connectGateway(url: string): Promise<void> {
+    // Validate gateway URL protocol
+    try {
+      const parsed = new URL(url);
+      if (!parsed.protocol.startsWith("wss")) {
+        throw new Error(`Invalid gateway protocol: ${parsed.protocol}`);
+      }
+    } catch (err) {
+      throw new Error(`Invalid gateway URL: ${String(err)}`);
+    }
+
     return new Promise((resolve, reject) => {
       const wsUrl = `${url}/?v=10&encoding=json`;
       this.ws = new WebSocket(wsUrl);
 
+      // Connection timeout
+      const connectTimer = setTimeout(() => {
+        reject(new Error("Gateway connection timeout"));
+        this.ws?.close();
+      }, DiscordChannel.GATEWAY_CONNECT_TIMEOUT_MS);
+
       this.ws.onopen = () => {
         this.logger?.info("Discord gateway connected");
+        this.reconnectAttempts = 0;
       };
 
       this.ws.onmessage = (event: any) => {
-        const data = JSON.parse(String(event.data));
+        let data: any;
+        try {
+          data = JSON.parse(String(event.data));
+        } catch (err) {
+          this.logger?.error("Failed to parse gateway message", {
+            error: String(err),
+          });
+          return;
+        }
         this.handleGatewayEvent(data);
 
         if (data.op === 10) {
-          // Hello - start heartbeat and identify
+          clearTimeout(connectTimer);
           this.startHeartbeat(data.d.heartbeat_interval);
           this.identify();
           resolve();
@@ -149,14 +185,26 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
       };
 
       this.ws.onerror = (event: any) => {
+        clearTimeout(connectTimer);
         this.logger?.error("Discord gateway error");
         reject(new Error("Gateway connection failed"));
       };
 
       this.ws.onclose = (event: any) => {
+        clearTimeout(connectTimer);
         this.logger?.warn(`Discord gateway closed: ${event.code}`);
         if (this.running) {
-          // Auto-reconnect
+          this.reconnectAttempts++;
+          if (this.reconnectAttempts > DiscordChannel.MAX_RECONNECT_ATTEMPTS) {
+            this.logger?.error("Max reconnect attempts reached, stopping");
+            this.running = false;
+            return;
+          }
+          // Exponential backoff with jitter
+          const baseDelay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 300_000);
+          const jitter = Math.random() * baseDelay * 0.1;
+          const delay = baseDelay + jitter;
+          this.logger?.info(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts})`);
           setTimeout(() => {
             this.connectGateway(
               this.resumeGatewayUrl ?? url
@@ -165,7 +213,7 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
                 error: String(err),
               })
             );
-          }, 5000);
+          }, delay);
         }
       };
     });
@@ -329,4 +377,16 @@ function guessMediaType(
   if (contentType.startsWith("video/")) return "video";
   if (contentType.startsWith("audio/")) return "audio";
   return "document";
+}
+
+/**
+ * Resolve token value: supports env var references prefixed with $
+ */
+function resolveToken(value: string): string | undefined {
+  if (!value) return undefined;
+  if (value.startsWith("$")) {
+    const envKey = value.slice(1);
+    return process.env[envKey] || undefined;
+  }
+  return value;
 }

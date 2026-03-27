@@ -47,6 +47,11 @@ export class ClaudeclawGateway {
   private tracer: Tracer;
   private sessionStore: MemorySessionStore;
 
+  // Rate limiting: per-sender sliding window
+  private rateLimitWindow = new Map<string, number[]>();
+  private static readonly RATE_LIMIT_MAX = 30; // max messages per window
+  private static readonly RATE_LIMIT_WINDOW_MS = 60_000; // 60 seconds
+
   constructor(config: ClaudeclawConfig, logger: Logger) {
     this.config = config;
     this.logger = logger;
@@ -141,6 +146,12 @@ export class ClaudeclawGateway {
   private async handleInboundMessage(
     message: InboundMessage
   ): Promise<void> {
+    // Rate limiting per sender
+    if (this.isRateLimited(message.senderId)) {
+      this.logger.warn(`Rate limited: ${message.senderId} (${message.senderName})`);
+      return;
+    }
+
     // Start trace
     const trace = this.tracer.startTrace(
       "gateway",
@@ -269,6 +280,30 @@ export class ClaudeclawGateway {
         `Workflow completed: ${event.workflowId} (status: ${event.status})`
       );
     });
+  }
+
+  // --- Rate Limiting ---
+
+  private isRateLimited(senderId: string): boolean {
+    const now = Date.now();
+    const windowStart = now - ClaudeclawGateway.RATE_LIMIT_WINDOW_MS;
+
+    let timestamps = this.rateLimitWindow.get(senderId);
+    if (!timestamps) {
+      timestamps = [];
+      this.rateLimitWindow.set(senderId, timestamps);
+    }
+
+    // Remove expired timestamps
+    const filtered = timestamps.filter((t) => t > windowStart);
+    this.rateLimitWindow.set(senderId, filtered);
+
+    if (filtered.length >= ClaudeclawGateway.RATE_LIMIT_MAX) {
+      return true;
+    }
+
+    filtered.push(now);
+    return false;
   }
 
   // --- Public Accessors ---

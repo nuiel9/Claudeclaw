@@ -49,13 +49,21 @@ export async function loadConfig(logger?: Logger): Promise<ClaudeclawConfig> {
 
   try {
     await access(configPath);
+  } catch {
+    logger?.info("No config found, using defaults");
+    return { ...DEFAULT_CONFIG };
+  }
+
+  try {
     const raw = await readFile(configPath, "utf-8");
     const userConfig = JSON.parse(raw) as Partial<ClaudeclawConfig>;
     const merged = deepMerge(DEFAULT_CONFIG, userConfig);
     logger?.info("Config loaded", { path: configPath });
     return merged as ClaudeclawConfig;
-  } catch {
-    logger?.info("No config found, using defaults");
+  } catch (err) {
+    logger?.warn("Config file corrupted or unreadable, using defaults", {
+      error: String(err),
+    });
     return { ...DEFAULT_CONFIG };
   }
 }
@@ -83,10 +91,14 @@ export function getConfigDir(): string {
 /**
  * Deep merge two objects
  */
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 function deepMerge(target: any, source: any): any {
   const result = { ...target };
 
   for (const key of Object.keys(source)) {
+    if (UNSAFE_KEYS.has(key)) continue;
+
     if (
       source[key] &&
       typeof source[key] === "object" &&
