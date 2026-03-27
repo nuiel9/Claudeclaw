@@ -10,6 +10,7 @@ import type {
   DiscordConfig,
   Logger,
 } from "../../core/types.js";
+import { isAllowed } from "../../security/index.js";
 import {
   GatewayIntentBits,
   Routes,
@@ -292,6 +293,22 @@ export class DiscordChannel implements ChannelPlugin<DiscordConfig> {
       timestamp: new Date(data.timestamp),
       raw: data,
     };
+
+    // Enforce access control (allowlist / group policy)
+    const isDM = !data.guild_id;
+    if (
+      !isAllowed(
+        message.senderId,
+        isDM ? "dm" : "group",
+        { groupPolicy: this.config.groupPolicy },
+        this.logger
+      )
+    ) {
+      this.logger?.info(
+        `Access denied for ${message.senderName} (${message.senderId})`
+      );
+      return;
+    }
 
     for (const handler of this.handlers) {
       try {

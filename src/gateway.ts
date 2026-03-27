@@ -5,7 +5,7 @@ import type {
 } from "./core/types.js";
 import { ClaudeclawEventBus } from "./core/events.js";
 import { AgentRegistry } from "./agents/registry/agent-registry.js";
-import { AgentCommHub } from "./agents/communication/agent-comm.js";
+import { AgentCommHub, type CommAuthPolicy } from "./agents/communication/agent-comm.js";
 import { HybridRouter } from "./router/hybrid-router.js";
 import { WorkflowEngine } from "./flows/workflow-engine.js";
 import { ConsensusEngine } from "./consensus/consensus-engine.js";
@@ -19,6 +19,12 @@ import {
   buildSessionKey,
   addMessageToSession,
 } from "./sessions/session-store.js";
+import {
+  SessionWriteLock,
+  ExecApprovalManager,
+  resolveToolPolicy,
+  isToolAllowed,
+} from "./security/index.js";
 
 /**
  * Main Claudeclaw Gateway
@@ -47,6 +53,10 @@ export class ClaudeclawGateway {
   private tracer: Tracer;
   private sessionStore: MemorySessionStore;
 
+  // Security systems
+  private sessionWriteLock: SessionWriteLock;
+  private execApprovalManager: ExecApprovalManager;
+
   // Rate limiting: per-sender sliding window
   private rateLimitWindow = new Map<string, number[]>();
   private static readonly RATE_LIMIT_MAX = 30; // max messages per window
@@ -60,7 +70,15 @@ export class ClaudeclawGateway {
     this.eventBus = new ClaudeclawEventBus(logger);
     this.sessionStore = new MemorySessionStore();
     this.agentRegistry = new AgentRegistry(this.eventBus, logger);
-    this.commHub = new AgentCommHub(this.eventBus, logger);
+
+    // Initialize CommHub with auth policy wired from agent config
+    const registeredAgents = new Set(Object.keys(config.agents));
+    const commAuthPolicy: CommAuthPolicy = { registeredAgents };
+    this.commHub = new AgentCommHub(this.eventBus, logger, commAuthPolicy);
+
+    // Initialize security systems
+    this.sessionWriteLock = new SessionWriteLock();
+    this.execApprovalManager = new ExecApprovalManager(logger);
     this.workflowEngine = new WorkflowEngine(this.eventBus, logger);
     this.consensusEngine = new ConsensusEngine(this.eventBus, logger);
     this.channelManager = new ChannelManager(logger, this.sessionStore);
@@ -176,7 +194,7 @@ export class ClaudeclawGateway {
         `Routed to agent: ${routeResult.agentId} (confidence: ${routeResult.confidence})`
       );
 
-      // Get or create session
+      // Get or create session (with write lock to prevent race conditions)
       const sessionKey = buildSessionKey({
         agentId: routeResult.agentId,
         channel: message.channel,
@@ -184,24 +202,27 @@ export class ClaudeclawGateway {
         peerId: message.senderId,
       });
 
-      let session = await this.sessionStore.get(sessionKey);
-      if (!session) {
-        session = createSession(
-          routeResult.agentId,
-          sessionKey,
-          message.channel,
-          message.senderId
-        );
-      }
-
-      // Add message to session
-      addMessageToSession(session, "user", message.content, {
-        channel: message.channel,
-        senderId: message.senderId,
-        senderName: message.senderName,
-      });
-
-      await this.sessionStore.set(sessionKey, session);
+      const session = await this.sessionWriteLock.withLock(
+        sessionKey,
+        async () => {
+          let s = await this.sessionStore.get(sessionKey);
+          if (!s) {
+            s = createSession(
+              routeResult.agentId,
+              sessionKey,
+              message.channel,
+              message.senderId
+            );
+          }
+          addMessageToSession(s, "user", message.content, {
+            channel: message.channel,
+            senderId: message.senderId,
+            senderName: message.senderName,
+          });
+          await this.sessionStore.set(sessionKey, s);
+          return s;
+        }
+      );
 
       // Emit event
       this.eventBus.emit("message:received", {

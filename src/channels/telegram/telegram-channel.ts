@@ -10,6 +10,7 @@ import type {
   TelegramConfig,
   Logger,
 } from "../../core/types.js";
+import { isAllowed } from "../../security/index.js";
 
 const TELEGRAM_MAX_MESSAGE = 4096;
 const TELEGRAM_CHUNK_SIZE = 4000;
@@ -62,6 +63,26 @@ export class TelegramChannel implements ChannelPlugin<TelegramConfig> {
     // Register message handler
     this.bot.on("message", async (grammyCtx: any) => {
       const message = this.transformInbound(grammyCtx);
+
+      // Enforce access control (allowlist / group policy)
+      const chatType = grammyCtx.message.chat.type === "private" ? "dm" : "group";
+      if (
+        !isAllowed(
+          message.senderId,
+          chatType as "dm" | "group",
+          {
+            allowFrom: this.config.allowFrom,
+            groupPolicy: this.config.groupPolicy,
+          },
+          this.logger
+        )
+      ) {
+        this.logger?.info(
+          `Access denied for ${message.senderName} (${message.senderId}) in ${chatType}`
+        );
+        return;
+      }
+
       for (const handler of this.handlers) {
         try {
           await handler(message);

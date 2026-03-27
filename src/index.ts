@@ -61,6 +61,18 @@ export { TelegramChannel } from "./channels/telegram/telegram-channel.js";
 export { DiscordChannel } from "./channels/discord/discord-channel.js";
 export { ChannelManager } from "./channels/plugins/channel-manager.js";
 
+// Security
+export {
+  isAllowed,
+  isToolAllowed,
+  resolveToolPolicy,
+  verifyWebhookSignature,
+  verifyTelegramSecret,
+  SessionWriteLock,
+  ExecApprovalManager,
+  FilesystemSandbox,
+} from "./security/index.js";
+
 // Observability
 export { Tracer } from "./observability/tracer.js";
 
