@@ -2,6 +2,7 @@ import type {
   ClaudeclawConfig,
   InboundMessage,
   Logger,
+  BootstrapFile,
 } from "./core/types.js";
 import { ClaudeclawEventBus } from "./core/events.js";
 import { AgentRegistry } from "./agents/registry/agent-registry.js";
@@ -27,6 +28,7 @@ import {
 } from "./security/index.js";
 import { RateLimiter } from "./security/rate-limiter.js";
 import { detectDuplicateTokens } from "./config/config-loader.js";
+import { ClaudeClient } from "./agents/claude-client.js";
 
 /**
  * Main Claudeclaw Gateway
@@ -59,6 +61,11 @@ export class ClaudeclawGateway {
   private sessionWriteLock: SessionWriteLock;
   private execApprovalManager: ExecApprovalManager;
   private rateLimiter: RateLimiter;
+
+  // LLM
+  private claudeClient: ClaudeClient | null = null;
+  private bootstrapFiles: BootstrapFile[] = [];
+  private systemPrompts = new Map<string, string>();
 
   constructor(config: ClaudeclawConfig, logger: Logger) {
     this.config = config;
@@ -110,36 +117,56 @@ export class ClaudeclawGateway {
       `Registered ${this.agentRegistry.listAgents().length} agents`
     );
 
-    // 2. Load bootstrap files for default agent
-    const bootstrapFiles = await loadBootstrapFiles(
+    // 2. Load bootstrap files for workspace
+    this.bootstrapFiles = await loadBootstrapFiles(
       this.config.workspace.path,
       { logger: this.logger }
     );
 
-    // 3. Build system prompt for default agent
-    const defaultAgent = this.config.agents[this.config.defaultAgent];
-    if (defaultAgent) {
+    // 3. Build system prompts for all agents
+    for (const agent of Object.values(this.config.agents)) {
       const systemPrompt = buildAgentSystemPrompt({
-        agent: defaultAgent,
-        bootstrapFiles,
+        agent,
+        bootstrapFiles: this.bootstrapFiles,
       });
+      this.systemPrompts.set(agent.id, systemPrompt);
       this.logger.info(
-        `System prompt built: ${systemPrompt.length} chars`
+        `System prompt built for ${agent.id}: ${systemPrompt.length} chars`
       );
     }
 
-    // 4. Initialize channels
+    // 4. Initialize Claude client (if API key is configured)
+    if (this.config.anthropic?.apiKey) {
+      try {
+        this.claudeClient = new ClaudeClient(
+          this.config.anthropic,
+          this.logger
+        );
+        this.logger.info("Claude API client initialized");
+      } catch (err) {
+        this.logger.warn("Claude client not available, using echo mode", {
+          error: String(err),
+        });
+      }
+    } else {
+      this.logger.warn(
+        "No Anthropic API key configured — running in echo mode. " +
+        "Set anthropic.apiKey in config or $ANTHROPIC_API_KEY env var."
+      );
+    }
+
+    // 5. Initialize channels
     await this.channelManager.initialize(this.config);
 
-    // 5. Set up message routing
+    // 6. Set up message routing
     this.channelManager.onMessage(async (message) => {
       await this.handleInboundMessage(message);
     });
 
-    // 6. Start all channels
+    // 7. Start all channels
     await this.channelManager.startAll(this.config.defaultAgent);
 
-    // 7. Set up event listeners
+    // 8. Set up event listeners
     this.setupEventListeners();
 
     this.logger.info("Claudeclaw Gateway started successfully");
@@ -235,19 +262,53 @@ export class ClaudeclawGateway {
         message,
       });
 
-      // Process with agent (placeholder for LLM integration)
+      // Process with agent via Claude API
       const agentSpan = this.tracer.startSpan(
         trace.traceId,
         routeResult.agentId,
         "process"
       );
 
-      // TODO: Integrate with actual LLM (Claude API) here
-      // For now, echo back with agent info
-      const responseContent =
-        `[${routeResult.agentId}] Received: "${message.content.slice(0, 100)}"` +
-        `\n\nI'm ${routeResult.agentId}, routed via ${routeResult.reason ?? "default"}. ` +
-        `This is where the LLM response would be generated.`;
+      let responseContent: string;
+
+      if (this.claudeClient) {
+        try {
+          const agent = this.config.agents[routeResult.agentId];
+          const systemPrompt = this.systemPrompts.get(routeResult.agentId);
+
+          const claudeResponse = await this.claudeClient.sendMessage(
+            session,
+            message.content,
+            {
+              model: agent?.model,
+              systemPrompt,
+            }
+          );
+
+          responseContent = claudeResponse.content;
+
+          this.tracer.addEvent(agentSpan, "llm_response", {
+            model: claudeResponse.model,
+            inputTokens: claudeResponse.inputTokens,
+            outputTokens: claudeResponse.outputTokens,
+            stopReason: claudeResponse.stopReason,
+          });
+        } catch (err) {
+          this.logger.error("Claude API call failed, falling back to echo", {
+            error: String(err),
+            agentId: routeResult.agentId,
+          });
+          responseContent =
+            `[${routeResult.agentId}] Sorry, I encountered an error processing your message. ` +
+            `Please try again later.`;
+        }
+      } else {
+        // Echo mode (no API key configured)
+        responseContent =
+          `[${routeResult.agentId}] Received: "${message.content.slice(0, 100)}"` +
+          `\n\nI'm ${routeResult.agentId}, routed via ${routeResult.reason ?? "default"}. ` +
+          `Claude API is not configured — running in echo mode.`;
+      }
 
       this.tracer.endSpan(agentSpan);
 
@@ -328,5 +389,9 @@ export class ClaudeclawGateway {
 
   getTracer(): Tracer {
     return this.tracer;
+  }
+
+  getClaudeClient(): ClaudeClient | null {
+    return this.claudeClient;
   }
 }

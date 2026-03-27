@@ -29,6 +29,11 @@ const DEFAULT_CONFIG: ClaudeclawConfig = {
     rules: [],
   },
   channels: {},
+  anthropic: {
+    apiKey: "$ANTHROPIC_API_KEY",
+    defaultModel: "sonnet",
+    maxTokens: 4096,
+  },
   workspace: {
     path: join(CONFIG_DIR, "workspace"),
     maxFileChars: 20_000,
@@ -104,6 +109,10 @@ export function detectDuplicateTokens(
     const t = config.channels.discord.token;
     tokenMap.set(t, [...(tokenMap.get(t) ?? []), "discord"]);
   }
+  if (config.anthropic?.apiKey) {
+    const t = config.anthropic.apiKey;
+    tokenMap.set(t, [...(tokenMap.get(t) ?? []), "anthropic"]);
+  }
 
   for (const [token, channels] of tokenMap) {
     if (channels.length > 1 && !token.startsWith("$")) {
@@ -137,6 +146,14 @@ function warnRawTokens(
   ) {
     logger?.warn(
       'Discord token is stored as raw value. Use env var reference (e.g. "$DISCORD_TOKEN") instead.'
+    );
+  }
+  if (
+    config.anthropic?.apiKey &&
+    !config.anthropic.apiKey.startsWith("$")
+  ) {
+    logger?.warn(
+      'Anthropic API key is stored as raw value. Use env var reference (e.g. "$ANTHROPIC_API_KEY") instead.'
     );
   }
   return config;

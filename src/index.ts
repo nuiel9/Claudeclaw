@@ -38,6 +38,9 @@ export { AgentRegistry } from "./agents/registry/agent-registry.js";
 // Agent Communication
 export { AgentCommHub } from "./agents/communication/agent-comm.js";
 
+// Claude API Client
+export { ClaudeClient, type ClaudeRequestOptions, type ClaudeResponse } from "./agents/claude-client.js";
+
 // Sessions
 export {
   MemorySessionStore,

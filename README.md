@@ -20,6 +20,7 @@ Inspired by [OpenClaw](https://github.com/openclaw/openclaw) — takes the best 
   - [Agent Communication](#agent-communication)
   - [DAG Workflow Engine](#dag-workflow-engine)
   - [Consensus Engine](#consensus-engine)
+  - [Claude API Integration](#claude-api-integration)
   - [Channel Plugins](#channel-plugins)
   - [Bootstrap / Workspace System](#bootstrap--workspace-system)
   - [Observability](#observability)
@@ -226,6 +227,51 @@ const result = await consensusEngine.resolve({
 });
 ```
 
+### Claude API Integration
+
+Claudeclaw integrates with the **Anthropic Claude API** via `@anthropic-ai/sdk` for LLM-powered agent responses.
+
+**Authentication**: Uses API key authentication (OAuth is restricted to Anthropic first-party apps only as of Feb 2026).
+
+```bash
+# Set your API key via environment variable
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
+```
+
+**Features:**
+- **Per-agent model selection** — each agent can use a different model (opus, sonnet, haiku)
+- **Session history** — full conversation context sent with each request
+- **System prompt injection** — SOUL.md + bootstrap files injected as system prompt
+- **Streaming support** — real-time token streaming for responsive UX
+- **Graceful fallback** — runs in echo mode if no API key is configured
+- **Error handling** — structured error responses with automatic fallback
+- **Base URL override** — support for proxies or compatible APIs
+- **Configurable limits** — max tokens, temperature, timeout per request
+
+**Model mapping:**
+
+| Short Name | Anthropic Model ID |
+|---|---|
+| `opus` | `claude-opus-4-6` |
+| `sonnet` | `claude-sonnet-4-6` |
+| `haiku` | `claude-haiku-4-5-20251001` |
+
+```typescript
+// Use in code
+const client = new ClaudeClient(config.anthropic, logger);
+
+const response = await client.sendMessage(session, "Hello!", {
+  model: "sonnet",
+  systemPrompt: "You are a helpful assistant.",
+  maxTokens: 4096,
+});
+
+// Streaming
+await client.streamMessage(session, "Tell me a story", {}, (chunk) => {
+  process.stdout.write(chunk);
+});
+```
+
 ### Channel Plugins
 
 #### Telegram (via grammY)
@@ -391,7 +437,8 @@ npm run build
 # Initialize workspace and config
 npx claudeclaw setup
 
-# Configure channel tokens via environment variables
+# Configure API keys via environment variables
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
 export TELEGRAM_TOKEN="your-telegram-bot-token"
 export DISCORD_TOKEN="your-discord-bot-token"
 
@@ -471,6 +518,14 @@ Config lives at `~/.claudeclaw/claudeclaw.json` (permissions: `0o600`):
       }
     }
   },
+  "anthropic": {
+    "apiKey": "$ANTHROPIC_API_KEY",
+    "defaultModel": "sonnet",
+    "maxTokens": 4096,
+    "temperature": 0.7,
+    "streaming": false,
+    "timeoutMs": 120000
+  },
   "workspace": {
     "path": "~/.claudeclaw/workspace",
     "maxFileChars": 20000,
@@ -525,6 +580,7 @@ claudeclaw/
 │   │   │   └── agent-registry.ts # Multi-agent registry + spawn + tool policy
 │   │   ├── communication/
 │   │   │   └── agent-comm.ts    # Send/yield/broadcast/pub-sub + blackboard
+│   │   ├── claude-client.ts     # Claude API client (streaming + non-streaming)
 │   │   └── system-prompt.ts     # System prompt builder (full/minimal/none)
 │   ├── router/
 │   │   └── hybrid-router.ts     # Rule-based + LLM fallback routing
@@ -579,6 +635,7 @@ claudeclaw/
 | Workflow engine | None | None | DAG with retry/fallback/parallel |
 | Consensus | None | None | 4 modes (vote/debate/ranked/unanimous) |
 | Channels | 9 platforms | CLI/IDE | Telegram + Discord (extensible plugin system) |
+| LLM Integration | OpenAI/Anthropic | Claude only | Claude API (key auth) + streaming |
 | Observability | Basic logging | Hooks | Trace dashboard with span tree |
 | Rate limiting | Basic | None | Multi-tier (sender/channel/global) |
 | Access control | Allowlists | None | ACL + guild/role + tool policy |
@@ -605,6 +662,36 @@ await gateway.start();
 // gateway.getConsensusEngine()
 // gateway.getTracer()
 await gateway.stop();
+```
+
+### Claude Client
+
+```typescript
+import { ClaudeClient } from "claudeclaw";
+
+const client = new ClaudeClient({
+  apiKey: "$ANTHROPIC_API_KEY",
+  defaultModel: "sonnet",
+  maxTokens: 4096,
+}, logger);
+
+// Non-streaming
+const response = await client.sendMessage(session, "Hello!", {
+  model: "opus",           // override per-request
+  systemPrompt: "You are a helpful assistant.",
+  temperature: 0.7,
+});
+console.log(response.content);       // "Hi there! How can I help?"
+console.log(response.inputTokens);   // 42
+console.log(response.outputTokens);  // 15
+
+// Streaming
+await client.streamMessage(session, "Explain quantum computing", {}, (chunk) => {
+  process.stdout.write(chunk);  // real-time output
+});
+
+// Health check
+const healthy = await client.healthCheck(); // true/false
 ```
 
 ### Agent Registry

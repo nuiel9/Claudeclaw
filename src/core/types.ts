@@ -416,8 +416,26 @@ export interface ClaudeclawConfig {
   defaultAgent: string;
   router: RouterConfig;
   channels: ChannelConfigs;
+  anthropic: AnthropicConfig;
   workspace: WorkspaceConfig;
   observability: ObservabilityConfig;
+}
+
+export interface AnthropicConfig {
+  /** API key or env var reference (e.g. "$ANTHROPIC_API_KEY") */
+  apiKey: string;
+  /** Default model for agents that don't specify one */
+  defaultModel: ModelId;
+  /** Max tokens for completion responses */
+  maxTokens: number;
+  /** Temperature (0-1) */
+  temperature?: number;
+  /** Base URL override (for proxies or compatible APIs) */
+  baseUrl?: string;
+  /** Request timeout in ms (default: 120000) */
+  timeoutMs?: number;
+  /** Enable streaming responses */
+  streaming?: boolean;
 }
 
 export interface ChannelConfigs {
