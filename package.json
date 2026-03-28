@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx watch src/cli/index.ts",
-    "start": "node dist/cli/index.ts",
+    "start": "node dist/cli/index.js",
     "lint": "eslint src/",
     "test": "vitest run"
   },

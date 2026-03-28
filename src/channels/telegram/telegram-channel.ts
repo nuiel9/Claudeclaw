@@ -83,12 +83,26 @@ export class TelegramChannel implements ChannelPlugin<TelegramConfig> {
         return;
       }
 
-      for (const handler of this.handlers) {
-        try {
-          await handler(message);
-        } catch (err) {
-          this.logger?.error("Handler error", { error: String(err) });
+      // Send typing indicator and keep refreshing while processing
+      const chatId = grammyCtx.message.chat.id;
+      const sendTyping = () =>
+        this.bot.api
+          .sendChatAction(chatId, "typing")
+          .catch(() => {/* ignore errors */});
+
+      sendTyping();
+      const typingInterval = setInterval(sendTyping, 4000);
+
+      try {
+        for (const handler of this.handlers) {
+          try {
+            await handler(message);
+          } catch (err) {
+            this.logger?.error("Handler error", { error: String(err) });
+          }
         }
+      } finally {
+        clearInterval(typingInterval);
       }
     });
 
